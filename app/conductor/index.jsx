@@ -41,6 +41,8 @@ export default function ConductorHomeScreen() {
   const [alertaActiva, setAlertaActiva] = useState(null);
   const [fichaMedica, setFichaMedica] = useState(null);
 
+  const [hospitalDestino, setHospitalDestino] = useState(null);
+
   const [placa, setPlaca] = useState("");
   const [codigo, setCodigo] = useState("");
   const [vinculando, setVinculando] = useState(false);
@@ -267,6 +269,25 @@ export default function ConductorHomeScreen() {
 
   // ── Paciente recogido (accepted → in_transit) ────────────────────
 
+  async function buscarHospitalCercano(lat, lng) {
+    try {
+      const url =
+        `https://maps.googleapis.com/maps/api/place/nearbysearch/json` +
+        `?location=${lat},${lng}&rankby=distance&type=hospital&key=${GOOGLE_MAPS_API_KEY}`;
+      const res = await fetch(url);
+      const json = await res.json();
+      if (json.status === "OK" && json.results.length > 0) {
+        const h = json.results[0];
+        return {
+          nombre: h.name,
+          latitude: h.geometry.location.lat,
+          longitude: h.geometry.location.lng,
+        };
+      }
+    } catch (_) {}
+    return null;
+  }
+
   function marcarRecogido() {
     Alert.alert(
       "Confirmar recogida",
@@ -276,14 +297,31 @@ export default function ConductorHomeScreen() {
         {
           text: "Confirmar",
           onPress: async () => {
+            let hospital = null;
+            if (ubicacion) {
+              hospital = await buscarHospitalCercano(
+                ubicacion.latitude,
+                ubicacion.longitude
+              );
+            }
+            setHospitalDestino(hospital);
+
+            const updateData = {
+              status: "in_transit",
+              picked_up_at: new Date().toISOString(),
+              ...(hospital && {
+                hospital_name: hospital.nombre,
+                hospital_latitude: hospital.latitude,
+                hospital_longitude: hospital.longitude,
+              }),
+            };
+
             await supabase
               .from("emergencies")
-              .update({
-                status: "in_transit",
-                picked_up_at: new Date().toISOString(),
-              })
+              .update(updateData)
               .eq("id", alertaActiva.id)
               .eq("driver_id", userId);
+
             setPanelModo("enTransito");
           },
         },
@@ -313,6 +351,7 @@ export default function ConductorHomeScreen() {
             setPanelModo("normal");
             setAlertaActiva(null);
             setFichaMedica(null);
+            setHospitalDestino(null);
           },
         },
       ]
@@ -444,6 +483,39 @@ export default function ConductorHomeScreen() {
             }}
           />
         )}
+
+        {panelModo === "enTransito" && ubicacion && hospitalDestino && (
+          <MapViewDirections
+            origin={ubicacion}
+            destination={{
+              latitude: hospitalDestino.latitude,
+              longitude: hospitalDestino.longitude,
+            }}
+            apikey={GOOGLE_MAPS_API_KEY}
+            strokeWidth={4}
+            strokeColor="#1565c0"
+            onReady={(result) => {
+              mapRef.current?.fitToCoordinates(result.coordinates, {
+                edgePadding: { top: 60, right: 60, bottom: 200, left: 60 },
+                animated: true,
+              });
+            }}
+            onError={() => {
+              Alert.alert("Ruta", "No se pudo calcular la ruta al hospital.");
+            }}
+          />
+        )}
+
+        {panelModo === "enTransito" && hospitalDestino && (
+          <Marker
+            coordinate={{
+              latitude: hospitalDestino.latitude,
+              longitude: hospitalDestino.longitude,
+            }}
+            title={hospitalDestino.nombre}
+            pinColor="#1565c0"
+          />
+        )}
       </MapView>
 
       {/* Panel normal: toggle GPS */}
@@ -546,10 +618,17 @@ export default function ConductorHomeScreen() {
       {/* Panel en tránsito: camino al hospital */}
       {panelModo === "enTransito" && (
         <View style={styles.panelTransito}>
-          <Text style={styles.enCaminoTitulo}>Paciente recogido</Text>
-          <Text style={styles.transitoSubtitulo}>
-            Dirígete al hospital y confirma la llegada.
-          </Text>
+          <Text style={styles.enCaminoTitulo}>🚑 Paciente recogido</Text>
+          {hospitalDestino ? (
+            <>
+              <Text style={styles.transitoHospitalLabel}>Destino</Text>
+              <Text style={styles.transitoHospitalNombre}>{hospitalDestino.nombre}</Text>
+            </>
+          ) : (
+            <Text style={styles.transitoSubtitulo}>
+              Dirígete al hospital y confirma la llegada.
+            </Text>
+          )}
           <TouchableOpacity style={styles.botonHospital} onPress={marcarCompletado}>
             <Text style={styles.botonRecogidoTexto}>Llegamos al hospital</Text>
           </TouchableOpacity>
@@ -692,16 +771,36 @@ const styles = StyleSheet.create({
   },
 
   panelTransito: {
-    flex: 1,
-    backgroundColor: "#fff8e1",
-    justifyContent: "center",
+    backgroundColor: "#fff",
+    paddingHorizontal: 24,
+    paddingTop: 20,
+    paddingBottom: 28,
+    gap: 10,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 8,
     alignItems: "center",
-    padding: 24,
-    gap: 16,
   },
   transitoSubtitulo: {
-    fontSize: 15,
-    color: "#555",
+    fontSize: 14,
+    color: "#666",
+    textAlign: "center",
+  },
+  transitoHospitalLabel: {
+    fontSize: 11,
+    color: "#999",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+    marginTop: 2,
+  },
+  transitoHospitalNombre: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: "#1565c0",
     textAlign: "center",
   },
 
