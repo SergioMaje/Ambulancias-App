@@ -6,30 +6,41 @@
 //   Con sesión, con perfil → (app)/
 
 import { Stack, useRouter, useSegments } from "expo-router";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { Session } from "@supabase/supabase-js";
 import { supabase } from "../lib/supabase";
+import {
+  registerForPushNotificationsAsync,
+  savePushToken,
+} from "../lib/notifications";
 
 
 export default function RootLayout() {
-  const [session, setSession] = useState(null);
+  const [session, setSession] = useState<Session | null>(null);
   // undefined = todavía cargando | null = no tiene perfil | string = rol del usuario
   const [role, setRole] = useState<string | null | undefined>(undefined);
   const router = useRouter();
   const segments = useSegments();
+  // Evita registrar el token más de una vez por sesión
+  const pushRegisteredRef = useRef<string | null>(null);
 
   // Carga el perfil del usuario desde la tabla profiles
   async function cargarPerfil(userId: string) {
-    try {
-      const { data } = await supabase
-        .from("profiles")
-        .select("role")
-        .eq("id", userId)
-        .single();
-      setRole(data?.role ?? null);
-    } catch {
-      // Si la tabla no existe todavía (credenciales placeholder), tratamos como sin perfil
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("role")
+      .eq("id", userId)
+      .single();
+
+    if (error) {
+      // PGRST116 = no rows found (usuario sin perfil → onboarding)
+      // Cualquier otro error = red/BD → mandamos a null para evitar pantalla en blanco;
+      // el onboarding verifica el perfil antes de sobreescribir cualquier rol existente.
       setRole(null);
+      return;
     }
+
+    setRole(data?.role ?? null);
   }
 
   useEffect(() => {
@@ -52,22 +63,47 @@ export default function RootLayout() {
     return () => subscription.unsubscribe();
   }, []);
 
+  // Registra el push token cada vez que cambia el usuario logueado
+  useEffect(() => {
+    const userId = session?.user.id;
+    if (!userId || pushRegisteredRef.current === userId) return;
+    pushRegisteredRef.current = userId;
+
+    registerForPushNotificationsAsync()
+      .then((token) => {
+        if (token) savePushToken(userId, token);
+      })
+      .catch(() => {
+        // No crashear la app si las notificaciones no están disponibles
+      });
+  }, [session?.user.id]);
+
   // Redirigimos cada vez que cambia la sesión o el rol
   useEffect(() => {
-    // Mientras cargamos, no hacemos nada
     if (role === undefined) return;
 
-    const enAuth = (segments[0] as string) === "(auth)";
+    const seg0 = segments[0] as string;
 
     if (!session) {
-      // No autenticado → login
-      if (!enAuth) router.replace("/(auth)/login" as any);
-    } else if (!role) {
-      // Autenticado pero sin rol elegido → onboarding
+      // Sin sesión → login (si no está ya en auth)
+      if (seg0 !== "(auth)") router.replace("/(auth)/login" as any);
+      return;
+    }
+
+    if (!role) {
+      // Con sesión pero sin perfil → onboarding
       router.replace("/(auth)/onboarding" as any);
-    } else {
-      // Autenticado con rol → app principal
-      if (enAuth) router.replace("/(app)/" as any);
+      return;
+    }
+
+    // Con sesión y rol → verificar que está en la pantalla correcta
+    const enDestino =
+      (role === "conductor" && seg0 === "conductor") ||
+      (role !== "conductor" && seg0 === "civil");
+
+    if (!enDestino) {
+      if (role === "conductor") router.replace("/conductor/" as any);
+      else router.replace("/civil/" as any);
     }
   }, [session, role]);
 

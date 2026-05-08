@@ -67,7 +67,7 @@ export default function RegisterScreen() {
     >
       <View style={styles.inner}>
         <Text style={styles.titulo}>Crear cuenta</Text>
-        <Text style={styles.subtitulo}>Únete a la red de emergencias</Text>
+        <Text style={styles.subtitulo}>Regístrate para solicitar emergencias</Text>
 
         <TextInput
           style={styles.input}
