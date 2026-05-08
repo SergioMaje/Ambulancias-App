@@ -1,3 +1,4 @@
+import Constants from "expo-constants";
 import * as Location from "expo-location";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -11,9 +12,22 @@ import {
   View,
 } from "react-native";
 import { useRouter } from "expo-router";
+import MapView, { Marker, PROVIDER_GOOGLE } from "react-native-maps";
+import MapViewDirections from "react-native-maps-directions";
 import { supabase } from "../../lib/supabase";
 
 const DURACION_SOS = 3000;
+
+const GOOGLE_MAPS_API_KEY =
+  Constants.expoConfig?.android?.config?.googleMaps?.apiKey ??
+  Constants.expoConfig?.ios?.config?.googleMapsApiKey ?? "";
+
+const REGION_DEFECTO = {
+  latitude: 40.4168,
+  longitude: -3.7038,
+  latitudeDelta: 0.05,
+  longitudeDelta: 0.05,
+};
 
 export default function CivilHomeScreen() {
   // idle | esperando | aceptada | en_camino | completada
@@ -24,10 +38,14 @@ export default function CivilHomeScreen() {
   const [alertaId, setAlertaId] = useState(null);
   const [presionando, setPresionando] = useState(false);
 
+  const [conductorUbicacion, setConductorUbicacion] = useState(null);
+
   const progreso = useRef(new Animated.Value(0)).current;
   const animRef = useRef(null);
   const presionandoRef = useRef(false);
   const channelRef = useRef(null);
+  const locationChannelRef = useRef(null);
+  const mapRef = useRef(null);
   const router = useRouter();
 
   useEffect(() => {
@@ -35,7 +53,10 @@ export default function CivilHomeScreen() {
       if (user) setUserId(user.id);
     });
     obtenerUbicacion();
-    return () => channelRef.current?.unsubscribe();
+    return () => {
+      channelRef.current?.unsubscribe();
+      locationChannelRef.current?.unsubscribe();
+    };
   }, []);
 
   async function obtenerUbicacion() {
@@ -139,10 +160,14 @@ export default function CivilHomeScreen() {
           filter: `id=eq.${id}`,
         },
         ({ new: alerta }) => {
-          if (alerta.status === "accepted") setEstado("aceptada");
+          if (alerta.status === "accepted") {
+            setEstado("aceptada");
+            if (alerta.driver_id) suscribirseUbicacionConductor(alerta.driver_id);
+          }
           if (alerta.status === "in_transit") setEstado("en_camino");
           if (alerta.status === "done") setEstado("completada");
           if (alerta.status === "cancelled") {
+            limpiarConductor();
             setEstado("idle");
             setAlertaId(null);
             progreso.setValue(0);
@@ -150,6 +175,37 @@ export default function CivilHomeScreen() {
         }
       )
       .subscribe();
+  }
+
+  async function suscribirseUbicacionConductor(driverId) {
+    const { data } = await supabase
+      .from("locations")
+      .select("latitude, longitude")
+      .eq("driver_id", driverId)
+      .single();
+    if (data) setConductorUbicacion({ latitude: data.latitude, longitude: data.longitude });
+
+    locationChannelRef.current = supabase
+      .channel(`civil-conductor-loc-${driverId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "locations",
+          filter: `driver_id=eq.${driverId}`,
+        },
+        ({ new: loc }) => {
+          setConductorUbicacion({ latitude: loc.latitude, longitude: loc.longitude });
+        }
+      )
+      .subscribe();
+  }
+
+  function limpiarConductor() {
+    locationChannelRef.current?.unsubscribe();
+    locationChannelRef.current = null;
+    setConductorUbicacion(null);
   }
 
   async function cancelarAlerta() {
@@ -160,6 +216,7 @@ export default function CivilHomeScreen() {
         .eq("id", alertaId);
     }
     channelRef.current?.unsubscribe();
+    limpiarConductor();
     setEstado("idle");
     setAlertaId(null);
     progreso.setValue(0);
@@ -167,6 +224,7 @@ export default function CivilHomeScreen() {
 
   function resetear() {
     channelRef.current?.unsubscribe();
+    limpiarConductor();
     setEstado("idle");
     setAlertaId(null);
     progreso.setValue(0);
@@ -190,13 +248,53 @@ export default function CivilHomeScreen() {
   }
 
   if (estado === "aceptada") {
+    const civilCoord = ubicacion
+      ? { latitude: ubicacion.lat, longitude: ubicacion.lng }
+      : null;
+
     return (
-      <SafeAreaView style={[styles.contenedor, { backgroundColor: "#e8f5e9" }]}>
-        <Text style={styles.iconoGrande}>✅</Text>
-        <Text style={styles.tituloEstado}>¡Ambulancia en camino!</Text>
-        <Text style={styles.subtituloEstado}>
-          Un conductor ha aceptado tu solicitud.{"\n"}Quédate donde estás.
-        </Text>
+      <SafeAreaView style={styles.contenedorMapa}>
+        <MapView
+          ref={mapRef}
+          style={styles.mapaCompleto}
+          provider={PROVIDER_GOOGLE}
+          initialRegion={
+            civilCoord
+              ? { ...civilCoord, latitudeDelta: 0.04, longitudeDelta: 0.04 }
+              : REGION_DEFECTO
+          }
+        >
+          {civilCoord && (
+            <Marker coordinate={civilCoord} title="Tu ubicación" pinColor="#1565c0" />
+          )}
+          {conductorUbicacion && (
+            <Marker coordinate={conductorUbicacion} title="Ambulancia" pinColor="#d32f2f" />
+          )}
+          {civilCoord && conductorUbicacion && (
+            <MapViewDirections
+              origin={conductorUbicacion}
+              destination={civilCoord}
+              apikey={GOOGLE_MAPS_API_KEY}
+              strokeWidth={4}
+              strokeColor="#d32f2f"
+              onReady={(result) => {
+                mapRef.current?.fitToCoordinates(result.coordinates, {
+                  edgePadding: { top: 80, right: 60, bottom: 200, left: 60 },
+                  animated: true,
+                });
+              }}
+            />
+          )}
+        </MapView>
+
+        <View style={styles.cardAceptada}>
+          <Text style={styles.cardTitulo}>🚑 ¡Ambulancia en camino!</Text>
+          <Text style={styles.cardSubtitulo}>
+            {conductorUbicacion
+              ? "Posición del conductor actualizada en tiempo real."
+              : "Localizando al conductor..."}
+          </Text>
+        </View>
       </SafeAreaView>
     );
   }
@@ -418,5 +516,44 @@ const styles = StyleSheet.create({
   botonSalir: {
     position: "absolute",
     bottom: 40,
+  },
+
+  // ── Mapa de seguimiento (estado aceptada) ────────────────────────
+  contenedorMapa: {
+    flex: 1,
+    backgroundColor: "#000",
+  },
+  mapaCompleto: {
+    flex: 1,
+  },
+  cardAceptada: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: "#fff",
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingHorizontal: 24,
+    paddingTop: 20,
+    paddingBottom: 36,
+    gap: 6,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  cardTitulo: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: "#222",
+    textAlign: "center",
+  },
+  cardSubtitulo: {
+    fontSize: 14,
+    color: "#666",
+    textAlign: "center",
+    lineHeight: 21,
   },
 });
