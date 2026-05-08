@@ -1,3 +1,4 @@
+import Constants from "expo-constants";
 import * as Location from "expo-location";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -15,7 +16,12 @@ import {
   View,
 } from "react-native";
 import MapView, { Marker, PROVIDER_GOOGLE } from "react-native-maps";
+import MapViewDirections from "react-native-maps-directions";
 import { supabase } from "../../lib/supabase";
+
+const GOOGLE_MAPS_API_KEY =
+  Constants.expoConfig?.android?.config?.googleMaps?.apiKey ??
+  Constants.expoConfig?.ios?.config?.googleMapsApiKey ?? "";
 
 const REGION_DEFECTO = {
   latitude: 40.4168,
@@ -416,6 +422,28 @@ export default function ConductorHomeScreen() {
             pinColor="#1565c0"
           />
         )}
+
+        {panelModo === "enCamino" && ubicacion && alertaActiva && (
+          <MapViewDirections
+            origin={ubicacion}
+            destination={{
+              latitude: alertaActiva.latitude,
+              longitude: alertaActiva.longitude,
+            }}
+            apikey={GOOGLE_MAPS_API_KEY}
+            strokeWidth={4}
+            strokeColor="#d32f2f"
+            onReady={(result) => {
+              mapRef.current?.fitToCoordinates(result.coordinates, {
+                edgePadding: { top: 60, right: 60, bottom: 60, left: 60 },
+                animated: true,
+              });
+            }}
+            onError={() => {
+              Alert.alert("Ruta", "No se pudo calcular la ruta. Verifica tu conexión.");
+            }}
+          />
+        )}
       </MapView>
 
       {/* Panel normal: toggle GPS */}
@@ -545,7 +573,7 @@ function FilaDato({ etiqueta, valor }) {
 const styles = StyleSheet.create({
   contenedor: { flex: 1, backgroundColor: "#000" },
   mapa: { flex: 1 },
-  mapaReducido: { height: 220 },
+  mapaReducido: { height: 280 },
 
   // ── Pantalla de turno ──────────────────────────────────────────
   turnoContenedor: { flex: 1, backgroundColor: "#f5f5f5" },
