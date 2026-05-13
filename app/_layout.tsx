@@ -13,6 +13,7 @@ import {
   registerForPushNotificationsAsync,
   savePushToken,
 } from "../lib/notifications";
+import { loadSounds, unloadSounds } from "../lib/sounds";
 
 
 export default function RootLayout() {
@@ -106,6 +107,11 @@ export default function RootLayout() {
       else router.replace("/civil/" as any);
     }
   }, [session, role]);
+
+  useEffect(() => {
+    loadSounds().catch(() => {});
+    return () => { unloadSounds(); };
+  }, []);
 
   // Mientras verificamos, no renderizamos nada (evita flash de pantalla incorrecta)
   if (role === undefined) return null;

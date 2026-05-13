@@ -15,6 +15,7 @@ import { useRouter } from "expo-router";
 import MapView, { Marker, PROVIDER_GOOGLE } from "react-native-maps";
 import MapViewDirections from "react-native-maps-directions";
 import { supabase } from "../../lib/supabase";
+import { playSound } from "../../lib/sounds";
 
 const DURACION_SOS = 3000;
 
@@ -110,6 +111,7 @@ export default function CivilHomeScreen() {
       return;
     }
 
+    playSound("sos");
     setEstado("esperando");
 
     const { error: insertError } = await supabase.from("emergencies").insert({
@@ -161,6 +163,7 @@ export default function CivilHomeScreen() {
         },
         ({ new: alerta }) => {
           if (alerta.status === "accepted") {
+            playSound("aceptado");
             setEstado("aceptada");
             if (alerta.driver_id) suscribirseUbicacionConductor(alerta.driver_id);
           }
@@ -209,6 +212,7 @@ export default function CivilHomeScreen() {
   }
 
   async function cancelarAlerta() {
+    playSound("cancelado");
     if (alertaId) {
       await supabase
         .from("emergencies")

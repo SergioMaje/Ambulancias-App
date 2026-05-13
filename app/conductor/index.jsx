@@ -18,6 +18,7 @@ import {
 import MapView, { Marker, PROVIDER_GOOGLE } from "react-native-maps";
 import MapViewDirections from "react-native-maps-directions";
 import { supabase } from "../../lib/supabase";
+import { playSound } from "../../lib/sounds";
 
 const GOOGLE_MAPS_API_KEY =
   Constants.expoConfig?.android?.config?.googleMaps?.apiKey ??
@@ -42,6 +43,8 @@ export default function ConductorHomeScreen() {
   const [fichaMedica, setFichaMedica] = useState(null);
 
   const [hospitalDestino, setHospitalDestino] = useState(null);
+  const [etaPaciente, setEtaPaciente] = useState(null);   // { minutos, km }
+  const [etaHospital, setEtaHospital] = useState(null);   // { minutos, km }
 
   const [placa, setPlaca] = useState("");
   const [codigo, setCodigo] = useState("");
@@ -51,6 +54,8 @@ export default function ConductorHomeScreen() {
   const alertChannelRef = useRef(null);
   const mapRef = useRef(null);
   const panelModoRef = useRef("sinTurno");
+  const alertaActivaRef = useRef(null);
+  const userIdRef = useRef(null);
 
   useEffect(() => {
     supabase.auth.getUser().then(async ({ data: { user } }) => {
@@ -79,6 +84,14 @@ export default function ConductorHomeScreen() {
   useEffect(() => {
     panelModoRef.current = panelModo;
   }, [panelModo]);
+
+  useEffect(() => {
+    alertaActivaRef.current = alertaActiva;
+  }, [alertaActiva]);
+
+  useEffect(() => {
+    userIdRef.current = userId;
+  }, [userId]);
 
   // ── Iniciar turno ────────────────────────────────────────────────
 
@@ -149,6 +162,22 @@ export default function ConductorHomeScreen() {
           ) {
             setAlertaActiva(alerta);
             setPanelModo("nuevaAlerta");
+            playSound("alerta");
+          }
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "emergencies" },
+        ({ new: alerta }) => {
+          if (
+            alerta?.status !== "pending" &&
+            alerta?.driver_id !== userIdRef.current &&
+            panelModoRef.current === "nuevaAlerta" &&
+            alertaActivaRef.current?.id === alerta?.id
+          ) {
+            setPanelModo("normal");
+            setAlertaActiva(null);
           }
         }
       )
@@ -260,9 +289,11 @@ export default function ConductorHomeScreen() {
 
     setFichaMedica(ficha ?? null);
     setPanelModo("enCamino");
+    playSound("aceptado");
   }
 
   function rechazarAlerta() {
+    playSound("cancelado");
     setPanelModo("normal");
     setAlertaActiva(null);
   }
@@ -305,6 +336,7 @@ export default function ConductorHomeScreen() {
               );
             }
             setHospitalDestino(hospital);
+            setEtaPaciente(null);
 
             const updateData = {
               status: "in_transit",
@@ -322,6 +354,7 @@ export default function ConductorHomeScreen() {
               .eq("id", alertaActiva.id)
               .eq("driver_id", userId);
 
+            playSound("recogido");
             setPanelModo("enTransito");
           },
         },
@@ -348,10 +381,12 @@ export default function ConductorHomeScreen() {
               })
               .eq("id", alertaActiva.id)
               .eq("driver_id", userId);
+            playSound("completado");
             setPanelModo("normal");
             setAlertaActiva(null);
             setFichaMedica(null);
             setHospitalDestino(null);
+            setEtaHospital(null);
           },
         },
       ]
@@ -477,9 +512,14 @@ export default function ConductorHomeScreen() {
                 edgePadding: { top: 60, right: 60, bottom: 60, left: 60 },
                 animated: true,
               });
+              setEtaPaciente({
+                minutos: Math.ceil(result.duration),
+                km: result.distance.toFixed(1),
+              });
             }}
-            onError={() => {
-              Alert.alert("Ruta", "No se pudo calcular la ruta. Verifica tu conexión.");
+            onError={(error) => {
+              console.error("[MapViewDirections enCamino]", error);
+              Alert.alert("Error de ruta", String(error));
             }}
           />
         )}
@@ -499,9 +539,14 @@ export default function ConductorHomeScreen() {
                 edgePadding: { top: 60, right: 60, bottom: 200, left: 60 },
                 animated: true,
               });
+              setEtaHospital({
+                minutos: Math.ceil(result.duration),
+                km: result.distance.toFixed(1),
+              });
             }}
-            onError={() => {
-              Alert.alert("Ruta", "No se pudo calcular la ruta al hospital.");
+            onError={(error) => {
+              console.error("[MapViewDirections enTransito]", error);
+              Alert.alert("Error de ruta al hospital", String(error));
             }}
           />
         )}
@@ -589,6 +634,25 @@ export default function ConductorHomeScreen() {
         >
           <Text style={styles.enCaminoTitulo}>En camino al paciente</Text>
 
+          {etaPaciente ? (
+            <View style={styles.etaCard}>
+              <View style={styles.etaBloque}>
+                <Text style={styles.etaValor}>{etaPaciente.minutos} min</Text>
+                <Text style={styles.etaLabel}>Tiempo estimado</Text>
+              </View>
+              <View style={styles.etaDivisor} />
+              <View style={styles.etaBloque}>
+                <Text style={styles.etaValor}>{etaPaciente.km} km</Text>
+                <Text style={styles.etaLabel}>Distancia</Text>
+              </View>
+            </View>
+          ) : (
+            <View style={styles.etaCardCargando}>
+              <ActivityIndicator size="small" color="#d32f2f" />
+              <Text style={styles.etaLabelCargando}>Calculando ruta…</Text>
+            </View>
+          )}
+
           <View style={styles.fichaCard}>
             <Text style={styles.fichaTituloSeccion}>Ficha médica</Text>
             {fichaMedica ? (
@@ -619,15 +683,29 @@ export default function ConductorHomeScreen() {
       {panelModo === "enTransito" && (
         <View style={styles.panelTransito}>
           <Text style={styles.enCaminoTitulo}>🚑 Paciente recogido</Text>
-          {hospitalDestino ? (
+          {hospitalDestino && (
             <>
               <Text style={styles.transitoHospitalLabel}>Destino</Text>
               <Text style={styles.transitoHospitalNombre}>{hospitalDestino.nombre}</Text>
             </>
+          )}
+          {etaHospital ? (
+            <View style={[styles.etaCard, styles.etaCardAzul]}>
+              <View style={styles.etaBloque}>
+                <Text style={[styles.etaValor, styles.etaValorAzul]}>{etaHospital.minutos} min</Text>
+                <Text style={styles.etaLabel}>Al hospital</Text>
+              </View>
+              <View style={styles.etaDivisor} />
+              <View style={styles.etaBloque}>
+                <Text style={[styles.etaValor, styles.etaValorAzul]}>{etaHospital.km} km</Text>
+                <Text style={styles.etaLabel}>Distancia</Text>
+              </View>
+            </View>
           ) : (
-            <Text style={styles.transitoSubtitulo}>
-              Dirígete al hospital y confirma la llegada.
-            </Text>
+            <View style={styles.etaCardCargando}>
+              <ActivityIndicator size="small" color="#1565c0" />
+              <Text style={styles.etaLabelCargando}>Calculando ruta al hospital…</Text>
+            </View>
           )}
           <TouchableOpacity style={styles.botonHospital} onPress={marcarCompletado}>
             <Text style={styles.botonRecogidoTexto}>Llegamos al hospital</Text>
@@ -650,7 +728,7 @@ function FilaDato({ etiqueta, valor }) {
 }
 
 const styles = StyleSheet.create({
-  contenedor: { flex: 1, backgroundColor: "#000" },
+  contenedor: { flex: 1, backgroundColor: "#fff" },
   mapa: { flex: 1 },
   mapaReducido: { height: 280 },
 
@@ -771,9 +849,10 @@ const styles = StyleSheet.create({
   },
 
   panelTransito: {
+    flex: 1,
     backgroundColor: "#fff",
     paddingHorizontal: 24,
-    paddingTop: 20,
+    paddingTop: 24,
     paddingBottom: 28,
     gap: 10,
     borderTopLeftRadius: 20,
@@ -874,5 +953,63 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     fontSize: 16,
     letterSpacing: 0.3,
+  },
+
+  // ── ETA cards ─────────────────────────────────────────────────
+  etaCard: {
+    flexDirection: "row",
+    backgroundColor: "#fff5f5",
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#ffcdd2",
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 0,
+  },
+  etaCardAzul: {
+    backgroundColor: "#e8f0fe",
+    borderColor: "#bbdefb",
+  },
+  etaBloque: {
+    flex: 1,
+    alignItems: "center",
+    gap: 2,
+  },
+  etaValor: {
+    fontSize: 22,
+    fontWeight: "800",
+    color: "#d32f2f",
+  },
+  etaValorAzul: {
+    color: "#1565c0",
+  },
+  etaLabel: {
+    fontSize: 11,
+    color: "#999",
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
+  },
+  etaDivisor: {
+    width: 1,
+    height: 36,
+    backgroundColor: "#ffcdd2",
+    marginHorizontal: 8,
+  },
+  etaCardCargando: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    paddingVertical: 14,
+    backgroundColor: "#fafafa",
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#eee",
+  },
+  etaLabelCargando: {
+    fontSize: 13,
+    color: "#888",
   },
 });
