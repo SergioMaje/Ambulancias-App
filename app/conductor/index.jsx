@@ -52,6 +52,7 @@ export default function ConductorHomeScreen() {
 
   const locationSubRef = useRef(null);
   const alertChannelRef = useRef(null);
+  const alertTimeoutRef = useRef(null);
   const mapRef = useRef(null);
   const panelModoRef = useRef("sinTurno");
   const alertaActivaRef = useRef(null);
@@ -78,6 +79,7 @@ export default function ConductorHomeScreen() {
     return () => {
       locationSubRef.current?.remove();
       alertChannelRef.current?.unsubscribe();
+      clearTimeout(alertTimeoutRef.current);
     };
   }, []);
 
@@ -141,41 +143,61 @@ export default function ConductorHomeScreen() {
     setPanelModo("normal");
   }
 
-  // ── Suscripción a alertas nuevas (solo cuando activo) ────────────
+  // ── Suscripción a alertas asignadas específicamente a este conductor ────────
+  // Filtra por assigned_driver_id para que solo llegue la alerta al más cercano.
+  // El UPDATE también cubre reasignaciones cuando otro conductor ignoró primero.
 
   useEffect(() => {
-    if (!activo) {
+    if (!activo || !userId) {
       alertChannelRef.current?.unsubscribe();
       alertChannelRef.current = null;
       return;
     }
 
+    function mostrarAlerta(alerta) {
+      if (panelModoRef.current !== "normal") return;
+      setAlertaActiva(alerta);
+      setPanelModo("nuevaAlerta");
+      playSound("alerta");
+    }
+
     alertChannelRef.current = supabase
-      .channel(`conductor-emergencia-${Date.now()}`)
+      .channel(`conductor-asignado-${userId}`)
       .on(
         "postgres_changes",
-        { event: "INSERT", schema: "public", table: "emergencies" },
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "emergencies",
+          filter: `assigned_driver_id=eq.${userId}`,
+        },
         ({ new: alerta }) => {
-          if (
-            alerta.status === "pending" &&
-            panelModoRef.current === "normal"
-          ) {
-            setAlertaActiva(alerta);
-            setPanelModo("nuevaAlerta");
-            playSound("alerta");
-          }
+          console.log("[realtime] INSERT asignado a mí:", alerta.id, alerta.status);
+          if (alerta.status === "pending") mostrarAlerta(alerta);
         }
       )
       .on(
         "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "emergencies" },
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "emergencies",
+          filter: `assigned_driver_id=eq.${userId}`,
+        },
         ({ new: alerta }) => {
+          console.log("[realtime] UPDATE assigned:", alerta.id, "status:", alerta.status, "driver:", alerta.assigned_driver_id);
+          // Reasignada a nosotros (otro conductor ignoró antes)
+          if (alerta.status === "pending") {
+            mostrarAlerta(alerta);
+            return;
+          }
+          // Civil canceló mientras teníamos la alerta activa
           if (
-            alerta?.status !== "pending" &&
-            alerta?.driver_id !== userIdRef.current &&
+            alerta.status === "cancelled" &&
             panelModoRef.current === "nuevaAlerta" &&
-            alertaActivaRef.current?.id === alerta?.id
+            alertaActivaRef.current?.id === alerta.id
           ) {
+            clearTimeout(alertTimeoutRef.current);
             setPanelModo("normal");
             setAlertaActiva(null);
           }
@@ -183,8 +205,61 @@ export default function ConductorHomeScreen() {
       )
       .subscribe();
 
+    // Hidratación inicial: muestra la alerta más antigua pendiente asignada a este conductor.
+    hidratarAlertaPendiente(userId);
+
     return () => alertChannelRef.current?.unsubscribe();
-  }, [activo]);
+  }, [activo, userId]);
+
+  // Busca la emergencia pendiente asignada más antigua y la muestra.
+  // Se llama al suscribirse Y al terminar una emergencia (marcarCompletado).
+  async function hidratarAlertaPendiente(driverId) {
+    if (panelModoRef.current !== "normal") return;
+    const id = driverId ?? userIdRef.current;
+    if (!id) return;
+
+    const cincoMinAtras = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    const { data: asignada } = await supabase
+      .from("emergencies")
+      .select("*")
+      .eq("assigned_driver_id", id)
+      .eq("status", "pending")
+      .gte("created_at", cincoMinAtras)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (asignada && panelModoRef.current === "normal") {
+      console.log("[despacho] hidratación: alerta pendiente encontrada:", asignada.id);
+      setAlertaActiva(asignada);
+      setPanelModo("nuevaAlerta");
+      playSound("alerta");
+    }
+  }
+
+  // ── Timer: auto-descartar si el conductor no responde en 2 minutos ─────────
+  // Complementa el pg_cron del servidor: el cliente se limpia solo aunque
+  // la reconexión de Realtime falle.
+
+  useEffect(() => {
+    if (panelModo !== "nuevaAlerta") {
+      clearTimeout(alertTimeoutRef.current);
+      return;
+    }
+    alertTimeoutRef.current = setTimeout(async () => {
+      const id = alertaActivaRef.current?.id;
+      if (id) {
+        const { data: nextDriver, error } = await supabase.rpc(
+          "reassign_emergency", { p_emergency_id: id }
+        );
+        if (error) console.error("[despacho] timeout reassign falló:", error.message);
+        else console.log("[despacho] timeout → reasignado a:", nextDriver ?? "ninguno disponible");
+      }
+      setPanelModo("normal");
+      setAlertaActiva(null);
+    }, 30_000);
+    return () => clearTimeout(alertTimeoutRef.current);
+  }, [panelModo]);
 
   // ── GPS tracking ─────────────────────────────────────────────────
 
@@ -292,8 +367,16 @@ export default function ConductorHomeScreen() {
     playSound("aceptado");
   }
 
-  function rechazarAlerta() {
+  async function rechazarAlerta() {
     playSound("cancelado");
+    clearTimeout(alertTimeoutRef.current);
+    if (alertaActiva?.id) {
+      const { data: nextDriver, error } = await supabase.rpc(
+        "reassign_emergency", { p_emergency_id: alertaActiva.id }
+      );
+      if (error) console.error("[despacho] reassign_emergency falló:", error.message);
+      else console.log("[despacho] reasignado a conductor:", nextDriver ?? "ninguno disponible");
+    }
     setPanelModo("normal");
     setAlertaActiva(null);
   }
@@ -387,6 +470,8 @@ export default function ConductorHomeScreen() {
             setFichaMedica(null);
             setHospitalDestino(null);
             setEtaHospital(null);
+            // Verificar si quedaron alertas pendientes asignadas a este conductor
+            hidratarAlertaPendiente();
           },
         },
       ]

@@ -193,13 +193,14 @@ export default function CivilHomeScreen() {
       .on(
         "postgres_changes",
         {
-          event: "UPDATE",
+          event: "*",
           schema: "public",
           table: "locations",
           filter: `driver_id=eq.${driverId}`,
         },
         ({ new: loc }) => {
-          setConductorUbicacion({ latitude: loc.latitude, longitude: loc.longitude });
+          if (loc?.latitude && loc?.longitude)
+            setConductorUbicacion({ latitude: loc.latitude, longitude: loc.longitude });
         }
       )
       .subscribe();
@@ -281,12 +282,7 @@ export default function CivilHomeScreen() {
               apikey={GOOGLE_MAPS_API_KEY}
               strokeWidth={4}
               strokeColor="#d32f2f"
-              onReady={(result) => {
-                mapRef.current?.fitToCoordinates(result.coordinates, {
-                  edgePadding: { top: 80, right: 60, bottom: 200, left: 60 },
-                  animated: true,
-                });
-              }}
+              resetOnChange={false}
             />
           )}
         </MapView>
